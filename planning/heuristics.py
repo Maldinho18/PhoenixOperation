@@ -1,6 +1,32 @@
 from __future__ import annotations
 
-from planning.pddl import ActionSchema, State, Objects
+from planning.pddl import (
+    Action,
+    ActionSchema,
+    Objects,
+    State,
+    get_all_groundings,
+    is_applicable,
+)
+
+
+_GROUNDINGS_CACHE: dict[tuple[int, tuple], list[Action]] = {}
+
+
+def _objects_key(objects: Objects) -> tuple:
+    return tuple(
+        (name, tuple(values))
+        for name, values in sorted(objects.items())
+    )
+
+
+def _grounded_actions(domain: list[ActionSchema], objects: Objects) -> list[Action]:
+    key = (id(domain), _objects_key(objects))
+
+    if key not in _GROUNDINGS_CACHE:
+        _GROUNDINGS_CACHE[key] = get_all_groundings(domain, objects)
+
+    return _GROUNDINGS_CACHE[key]
 
 
 def nullHeuristic(
@@ -45,7 +71,34 @@ def ignorePreconditionsHeuristic(
          Remember: with no preconditions, every grounding is "applicable".
     """
     ### Your code here ###
+    unsatisfied = goal - state
+    if not unsatisfied:
+        return 0
 
+    action_adds = [
+        action.add_list
+        for action in _grounded_actions(domain, objects)
+        if action.add_list & unsatisfied
+    ]
+
+    steps = 0
+    remaining = set(unsatisfied)
+
+    while remaining:
+        best_adds = max(
+            action_adds,
+            key=lambda adds: len(adds & remaining),
+            default=frozenset(),
+        )
+        covered = best_adds & remaining
+
+        if not covered:
+            return float("inf")
+
+        remaining.difference_update(covered)
+        steps += 1
+
+    return steps
     ### End of your code ###
 
 
@@ -65,13 +118,13 @@ def ignoreDeleteListsHeuristic(
     has a delete list (effects never remove fluents from the state).
 
     In this monotone relaxation, the state only grows over time (fluents are
-    never removed), so hill-climbing always makes progress and cannot loop.
+    never removed), so relaxed reachability can be computed layer by layer.
 
-    Algorithm (hill-climbing on the relaxed problem):
-      1. Start from the current state with a relaxed (monotone) apply function.
-      2. At each step, pick the grounded action that adds the most unsatisfied
-         goal fluents (greedy hill-climbing).
-      3. Count steps until all goal fluents are satisfied (or until no progress).
+    Algorithm (relaxed planning graph):
+      1. Start from the current state.
+      2. At each level, find every grounded action whose preconditions hold.
+      3. Add all positive effects and ignore all delete effects.
+      4. Count levels until all goal fluents are satisfied.
 
     Tip: In the relaxed problem, apply_action never removes fluents.
          You can implement this by treating del_list as empty for all actions.
@@ -79,5 +132,21 @@ def ignoreDeleteListsHeuristic(
          each step (preconditions still apply in the relaxed model).
     """
     ### Your code here ###
+    relaxed_state = state
+    levels = 0
 
+    while not goal.issubset(relaxed_state):
+        next_state = relaxed_state
+
+        for action in _grounded_actions(domain, objects):
+            if is_applicable(relaxed_state, action):
+                next_state = frozenset(next_state | action.add_list)
+
+        if next_state == relaxed_state:
+            return float("inf")
+
+        relaxed_state = next_state
+        levels += 1
+
+    return levels
     ### End of your code ###
