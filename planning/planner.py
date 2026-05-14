@@ -581,5 +581,6 @@ def aStarPlanner(
 # Aliases used by the command-line argument parser
 tinyBaseSearch = tinyBaseSearch
 forwardBFS = forwardBFS
+forwardSearch = forwardBFS
 backwardSearch = backwardSearch
 aStarPlanner = aStarPlanner
