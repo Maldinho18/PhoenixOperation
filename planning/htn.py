@@ -54,6 +54,7 @@ def hierarchicalSearch(problem: Problem, hlas: list[HLA]) -> list[Action]:
  
     while queue:
         plan = queue.popleft()
+        problem._expanded += 1
  
         
         sig = tuple(
@@ -93,7 +94,7 @@ def hierarchicalSearch(problem: Problem, hlas: list[HLA]) -> list[Action]:
 # ---------------------------------------------------------------------------
 
 
-def build_htn_hierarchy(problem: Problem) -> list[HLA]:
+def build_htn_hierarchy(problem: Problem, patient_order: list[str] | None = None) -> list[HLA]:
 
     state = problem.initial_state
     objects = problem.objects
@@ -101,18 +102,22 @@ def build_htn_hierarchy(problem: Problem) -> list[HLA]:
     robots = objects["robots"]
     cells = objects["cells"]
     supplies_list = objects["supplies"]
-    patients = objects["patients"]
+    patients = patient_order or objects["patients"]
     medical_posts = objects["medical_posts"]
 
     robot = robots[0]
+    if not supplies_list or not patients or not medical_posts:
+        return []
  
     # Build adjacency map from fluents in the initial state
     adjacency: dict[tuple, list[tuple]] = {c: [] for c in cells}
     for fluent in state:
         if fluent[0] == "Adjacent":
             _, a, b = fluent
-            adjacency[a].append(b)
-            adjacency[b].append(a)  # Adjacent is symmetric
+            if b not in adjacency[a]:
+                adjacency[a].append(b)
+    for neighbors in adjacency.values():
+        neighbors.sort()
  
     # ------------------------------------------------------------------
     # Helper: Navigate HLA
@@ -199,8 +204,10 @@ def build_htn_hierarchy(problem: Problem) -> list[HLA]:
     # Pair each patient with a supply (round-robin if counts differ)
     top_level: list[HLA] = []
  
+    prepared_supplies = False
+
     for i, patient in enumerate(patients):
-        supply = supplies_list[i % len(supplies_list)]
+        supply = supplies_list[0]
         medical_post = medical_posts[0]  # Use first medical post
  
         supply_loc = get_location(supply)
@@ -294,17 +301,20 @@ def build_htn_hierarchy(problem: Problem) -> list[HLA]:
             ],
         )
  
+        mission_refinement = [prepare_supplies, extract_patient, rescue_patient]
+        if prepared_supplies:
+            mission_refinement = [extract_patient, rescue_patient]
+
         # --- FullRescueMission HLA ---
         full_mission = HLA(
             f"FullRescueMission({supply}, {patient}, {medical_post})",
-            refinements=[
-                [prepare_supplies, extract_patient, rescue_patient]
-            ],
+            refinements=[mission_refinement],
         )
  
         top_level.append(full_mission)
  
         # After this mission, the robot is at medical_post for the next iteration
         robot_loc = medical_post
+        prepared_supplies = True
  
     return top_level

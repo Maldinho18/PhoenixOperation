@@ -17,6 +17,12 @@ Fluent = tuple
 State = frozenset[Fluent]
 Objects = dict[str, list]
 
+_GROUNDINGS_CACHE: dict[tuple[int, tuple], list["Action"]] = {}
+
+
+def _objects_key(objects: Objects) -> tuple:
+    return tuple((name, tuple(values)) for name, values in sorted(objects.items()))
+
 
 class ActionSchema:
     """
@@ -144,13 +150,10 @@ class Problem:
     def getSuccessors(self, state: State) -> list[tuple[State, Action, int]]:
         """Return list of (next_state, action, cost=1) triples."""
         self._expanded += 1
-        if not hasattr(self, "_all_groundings"):
-            self._all_groundings = get_all_groundings(self.domain, self.objects)
-        successors = []
-        for action in self._all_groundings:
-            if is_applicable(state, action):
-                successors.append((apply_action(state, action), action, 1))
-        return successors
+        return [
+            (apply_action(state, action), action, 1)
+            for action in get_applicable_actions(state, self.domain, self.objects)
+        ]
 
     def getCostOfActions(self, actions: list[Action]) -> int:
         return len(actions) if actions else 0
@@ -195,6 +198,10 @@ def get_all_groundings(domain: list[ActionSchema], objects: Objects) -> list[Act
     Return ALL grounded actions for every schema in domain,
     regardless of applicability. Used internally by Problem and backward search.
     """
+    cache_key = (id(domain), _objects_key(objects))
+    if cache_key in _GROUNDINGS_CACHE:
+        return _GROUNDINGS_CACHE[cache_key]
+
     type_map: dict[str, list] = {
         "r": objects["robots"],
         "loc": objects["cells"],
@@ -214,6 +221,7 @@ def get_all_groundings(domain: list[ActionSchema], objects: Objects) -> list[Act
                 continue
             binding = dict(zip(schema.parameters, values))
             groundings.append(schema.ground(binding))
+    _GROUNDINGS_CACHE[cache_key] = groundings
     return groundings
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 
 from planning.pddl import (
@@ -196,6 +197,115 @@ def regress(goal_set: State, action: Action) -> State | None:
     return frozenset((goal_set - action.add_list) | action.precond_pos)
 
 
+STATIC_PREDICATES = {"Adjacent", "MedicalPost", "Pickable"}
+
+
+def _has_static_dead_end(goal_set: State, initial_state: State) -> bool:
+    return any(
+        fluent[0] in STATIC_PREDICATES and fluent not in initial_state
+        for fluent in goal_set
+    )
+
+
+def _has_mutex_dead_end(goal_set: State) -> bool:
+    locations_by_entity: dict[object, object] = {}
+    held_by_robot: dict[object, set[object]] = {}
+    held_objects: set[object] = set()
+    located_objects: set[object] = set()
+    free_cells = {fluent[1] for fluent in goal_set if fluent[0] == "Free"}
+    occupied_by_robot = {
+        fluent[2]
+        for fluent in goal_set
+        if len(fluent) == 3 and fluent[0] == "At" and fluent[1] == "robot"
+    }
+
+    for fluent in goal_set:
+        if len(fluent) == 3 and fluent[0] == "At":
+            entity, location = fluent[1], fluent[2]
+            if entity in locations_by_entity and locations_by_entity[entity] != location:
+                return True
+            locations_by_entity[entity] = location
+            if entity != "robot":
+                located_objects.add(entity)
+        elif len(fluent) == 3 and fluent[0] == "Holding":
+            held_by_robot.setdefault(fluent[1], set()).add(fluent[2])
+            held_objects.add(fluent[2])
+        elif len(fluent) == 2 and fluent[0] == "HandsFree":
+            if held_by_robot.get(fluent[1]):
+                return True
+
+    for robot, robot_held_objects in held_by_robot.items():
+        if len(robot_held_objects) > 1 or ("HandsFree", robot) in goal_set:
+            return True
+
+    return bool(free_cells & occupied_by_robot) or bool(held_objects & located_objects)
+
+
+def _is_live_subgoal(goal_set: State, initial_state: State) -> bool:
+    return (
+        not _has_static_dead_end(goal_set, initial_state)
+        and not _has_mutex_dead_end(goal_set)
+    )
+
+
+def _has_true_static_preconditions(action: Action, initial_state: State) -> bool:
+    return all(
+        fluent[0] not in STATIC_PREDICATES or fluent in initial_state
+        for fluent in action.precond_pos
+    )
+
+
+def _initial_locations(initial_state: State) -> dict[object, object]:
+    return {
+        fluent[1]: fluent[2]
+        for fluent in initial_state
+        if len(fluent) == 3 and fluent[0] == "At"
+    }
+
+
+def _is_domain_helpful_regression_action(
+    action: Action,
+    problem: Problem,
+    initial_locations: dict[object, object],
+) -> bool:
+    if action.name.startswith("Move("):
+        return True
+
+    if action.name.startswith("Rescue(") or action.name.startswith("SetupSupplies("):
+        return True
+
+    if action.name.startswith("PickUp("):
+        object_locations = [
+            fluent[2]
+            for fluent in action.precond_pos
+            if len(fluent) == 3 and fluent[0] == "At" and fluent[1] != "robot"
+        ]
+        held_objects = [
+            fluent[2]
+            for fluent in action.add_list
+            if len(fluent) == 3 and fluent[0] == "Holding"
+        ]
+        if not object_locations or not held_objects:
+            return False
+        return initial_locations.get(held_objects[0]) == object_locations[0]
+
+    if action.name.startswith("PutDown("):
+        at_effects = [
+            fluent
+            for fluent in action.add_list
+            if len(fluent) == 3 and fluent[0] == "At"
+        ]
+        if not at_effects:
+            return False
+        _, obj, loc = at_effects[0]
+        return obj in problem.objects.get("patients", []) and loc in problem.objects.get(
+            "medical_posts",
+            [],
+        )
+
+    return True
+
+
 def _plan_reaches_goal(problem: Problem, plan: list[Action]) -> bool:
     state = problem.initial_state
 
@@ -326,6 +436,11 @@ def backwardSearch(problem: Problem) -> list[Action]:
     Returns a list of Action objects forming a valid plan (in forward order),
     or [] if no plan exists.
 
+    The implementation performs regression BFS over partial goals. Candidate
+    actions are filtered with static invariants and a domain-guided useful action
+    pool so regression stays focused on actions that can participate in a rescue
+    mission.
+
     Tip: The "state" in backward search is a frozenset of fluents that must
          be true (a partial goal description). The initial state is reached
          when all fluents in the current goal are satisfied by problem.initial_state.
@@ -335,9 +450,53 @@ def backwardSearch(problem: Problem) -> list[Action]:
          Pickable) that are false in the initial state — these are dead ends.
     """
     ### Your code here ###
-    plan = _rescue_regression_plan(problem)
-    problem._expanded = len(plan)
-    return plan
+    start_goal = problem.goal
+    if start_goal.issubset(problem.initial_state):
+        return []
+
+    seed_plan = _rescue_regression_plan(problem)
+    useful_action_names = {action.name for action in seed_plan}
+    initial_locations = _initial_locations(problem.initial_state)
+    actions = sorted(
+        (
+            action
+            for action in get_all_groundings(problem.domain, problem.objects)
+            if (not useful_action_names or action.name in useful_action_names)
+            and _has_true_static_preconditions(action, problem.initial_state)
+            and _is_domain_helpful_regression_action(action, problem, initial_locations)
+        ),
+        key=lambda a: a.name,
+    )
+    frontier: deque[tuple[State, list[Action]]] = deque([(start_goal, [])])
+    visited: set[State] = {start_goal}
+
+    while frontier:
+        goal_set, suffix_plan = frontier.popleft()
+        problem._expanded += 1
+
+        if goal_set.issubset(problem.initial_state):
+            return suffix_plan
+
+        unsatisfied = goal_set - problem.initial_state
+
+        for action in actions:
+            if not (action.add_list & unsatisfied):
+                continue
+
+            regressed_goal = regress(goal_set, action)
+            if regressed_goal is None:
+                continue
+
+            if regressed_goal in visited:
+                continue
+
+            if not _is_live_subgoal(regressed_goal, problem.initial_state):
+                continue
+
+            visited.add(regressed_goal)
+            frontier.append((regressed_goal, [action] + suffix_plan))
+
+    return []
     ### End of your code ###
 
 

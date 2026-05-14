@@ -1,5 +1,6 @@
 import sys
 import heapq
+from collections import deque
 
 
 class Stack:
@@ -22,13 +23,13 @@ class Queue:
     """A container with a first-in-first-out (FIFO) queuing policy."""
 
     def __init__(self):
-        self.list = []
+        self.list = deque()
 
     def push(self, item):
-        self.list.insert(0, item)
+        self.list.append(item)
 
     def pop(self):
-        return self.list.pop()
+        return self.list.popleft()
 
     def isEmpty(self):
         return len(self.list) == 0
