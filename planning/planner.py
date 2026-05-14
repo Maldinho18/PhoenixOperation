@@ -454,6 +454,10 @@ def backwardSearch(problem: Problem) -> list[Action]:
     if start_goal.issubset(problem.initial_state):
         return []
 
+    # Trazabilidad IA: esta poda guiada por dominio surgió durante la revisión
+    # con apoyo de IA y luego fue validada manualmente contra la fórmula de
+    # regresión. No reemplaza la BFS regresiva; solo limita las acciones
+    # candidatas a aquellas que pueden participar en una misión de rescate.
     seed_plan = _rescue_regression_plan(problem)
     useful_action_names = {action.name for action in seed_plan}
     initial_locations = _initial_locations(problem.initial_state)
